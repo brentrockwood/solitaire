@@ -121,7 +121,7 @@ final class GameController {
 
     func resetVegasTotal() {
         settings.vegasScore = 0
-        onChange?(game)
+        onTick?()  // labels only; a full change notification would replay a finished game's celebration
     }
 
     // MARK: - Clock

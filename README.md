@@ -25,7 +25,7 @@ make install    # copy to /Applications
 - Game menu: New Game (⌘N), Restart This Game (⌘R), Undo Move (⌘Z), Autocomplete (⌘A).
 - When the game can be finished automatically, a sheen sweeps the table (and again every
   ten seconds). Double-click the bottom card of any column, or press ⌘A, to finish it.
-- Click anywhere during the winning card cascade to skip to the end.
+- Winning sets off fireworks and a card cascade. Click anywhere to skip to the end.
 - Options live in the Game menu: Draw Three, Scoring (None / Standard / Vegas),
   Vegas Cumulative Score and its reset, Left-Handed Layout, Show Time and Moves, Sound.
   Draw mode and scoring take effect at the next deal, as in the original.

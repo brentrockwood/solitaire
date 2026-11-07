@@ -9,6 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var screenshotPath: String?
     var uiTest: UITest?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false  // keeps "Show Tab Bar" out of the View menu
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         table = TableView(controller: controller)
@@ -21,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // restores the autosaved frame with a zero aspect ratio, which silently aborts the rest of
         // this method (no window, no screenshot timer). Unconstrained is already the default.
         window.collectionBehavior = [.fullScreenPrimary]
+        window.tabbingMode = .disallowed
         window.setFrameAutosaveName("MainWindow")
         window.isReleasedWhenClosed = false
         window.center()
@@ -51,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         let appMenu = NSMenu()
         let appItem = NSMenuItem(); appItem.submenu = appMenu; main.addItem(appItem)
-        appMenu.addItem(withTitle: "About Solitaire", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "About Solitaire", action: #selector(showAbout), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Solitaire", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -114,6 +119,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: - Actions
 
+    /// Info.plist's NSHumanReadableCopyright when running from the bundle; the bare `swift build`
+    /// binary has no Info.plist, so fall back to the same string.
+    static let copyright = (Bundle.main.infoDictionary?["NSHumanReadableCopyright"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        ?? "© 2026 Brent Rockwood"
+
+    @objc func showAbout() {
+        NSApp.orderFrontStandardAboutPanel(options: [NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): Self.copyright])
+    }
+
     @objc func newGame() { controller.newGame() }
     @objc func restartGame() { controller.restartGame() }
     @objc func undoMove() { controller.undo() }
@@ -168,18 +182,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         alert.informativeText = lines.joined(separator: "\n")
         alert.addButton(withTitle: "New Game")
         alert.addButton(withTitle: "Close")
+        // Fill the empty right side of the sheet: 🎉 centred above the New Game button, halfway
+        // between the button's top and the sheet's top edge. NSAlert lays its content out again
+        // when the sheet is presented (80 pt shorter, icon hidden) and drops foreign constraints,
+        // so place by frame and re-place whenever the content view changes size.
         alert.layout()
-        if let content = alert.window.contentView {  // the top-right of the sheet is otherwise empty
+        var observers: [NSObjectProtocol] = []
+        if let content = alert.window.contentView, let button = alert.buttons.first {
             let party = NSTextField(labelWithString: "🎉")
             party.font = NSFont.systemFont(ofSize: 34)
             party.sizeToFit()
-            let inset: CGFloat = 16
-            party.frame.origin = CGPoint(x: content.bounds.maxX - inset - party.frame.width,
-                                         y: content.bounds.maxY - inset - party.frame.height)
-            party.autoresizingMask = [.minXMargin, .minYMargin]
             content.addSubview(party)
+            let place = {
+                let b = content.convert(button.frame, from: button.superview)
+                let cx = b.midX, cy = (b.maxY + content.bounds.maxY) / 2
+                party.frame.origin = CGPoint(x: (cx - party.frame.width / 2).rounded(), y: (cy - party.frame.height / 2).rounded())
+            }
+            place()
+            // The content view resizes first and its button row is re-laid out afterwards, so watch both.
+            for v in [content, button.superview ?? button, button] {
+                v.postsFrameChangedNotifications = true
+                observers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: v, queue: .main) { _ in
+                    MainActor.assumeIsolated(place)
+                })
+            }
+            DispatchQueue.main.async(execute: place)
         }
         alert.beginSheetModal(for: window) { [weak self] r in
+            for o in observers { NotificationCenter.default.removeObserver(o) }
             if r == .alertFirstButtonReturn { self?.controller.newGame() }
         }
     }

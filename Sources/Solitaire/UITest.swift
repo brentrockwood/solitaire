@@ -114,16 +114,19 @@ final class UITest {
         dump(v, 0)
     }
 
-    /// D. The win sheet's 🎉 label: present, inside the content view, in its top-right corner, clear of the title.
+    /// Depth-first search of a view tree.
+    private func findView<T: NSView>(_ v: NSView, _ pred: (T) -> Bool) -> T? {
+        if let t = v as? T, pred(t) { return t }
+        for s in v.subviews { if let t: T = findView(s, pred) { return t } }
+        return nil
+    }
+
+    /// D. The win sheet's 🎉 label: present, inside the content view, centred above the "New Game" button
+    /// (horizontally on the button, vertically halfway between the button's top and the sheet's top), clear of the title.
     private func checkWinSheetEmoji() {
         guard let sheet = window.attachedSheet, let content = sheet.contentView else { check("D1 win sheet content view", false, "no sheet attached"); return }
-        func find(_ v: NSView, _ pred: (NSTextField) -> Bool) -> NSTextField? {
-            if let t = v as? NSTextField, pred(t) { return t }
-            for s in v.subviews { if let t = find(s, pred) { return t } }
-            return nil
-        }
-        let party = find(content) { $0.stringValue == "🎉" }
-        let title = find(content) { $0.stringValue == "You won!" }
+        let party: NSTextField? = findView(content) { $0.stringValue == "🎉" }
+        let title: NSTextField? = findView(content) { $0.stringValue == "You won!" }
         check("D1 🎉 label is a text field in the sheet", party != nil && title != nil, "party=\(party.map { fmt($0.frame) } ?? "missing") title=\(title.map { fmt($0.frame) } ?? "missing")")
         guard let party, let title else { return }
         let b = content.bounds
@@ -131,8 +134,92 @@ final class UITest {
         let tf = content.convert(title.frame, from: title.superview)
         let where_ = "party \(fmt(pf)) title \(fmt(tf)) bounds \(fmt(b)) flipped=\(content.isFlipped) directChild=\(party.superview === content)"
         check("D2 🎉 inside the content view", b.contains(pf) && !party.isHidden, where_)
-        check("D3 🎉 in the top-right corner", pf.maxX >= b.maxX - 20 && pf.maxY >= b.maxY - 20, where_)
+        let newGame: NSButton? = findView(content) { $0.title == "New Game" }
+        if let newGame {
+            let bf = content.convert(newGame.frame, from: newGame.superview)
+            let wantMidY = (bf.maxY + b.maxY) / 2
+            let geo = String(format: "party.mid=(%.1f,%.1f) button %@ (in content coords; superview %@) button.midX=%.1f (button.maxY %.0f + content.maxY %.0f)/2=%.1f",
+                             pf.midX, pf.midY, fmt(bf), String(describing: type(of: newGame.superview!)), bf.midX, bf.maxY, b.maxY, wantMidY)
+            check("D3a 🎉 centred horizontally on the New Game button (±2)", abs(pf.midX - bf.midX) <= 2, geo)
+            check("D3b 🎉 centred vertically between the button top and the sheet top (±2)", abs(pf.midY - wantMidY) <= 2, geo)
+        } else {
+            check("D3 New Game button found in the sheet", false, "no NSButton titled \"New Game\" in the sheet view tree")
+        }
         check("D4 🎉 clear of the title", pf.minX > tf.minX + 100, where_)
+    }
+
+    // MARK: - Fireworks helpers
+
+    private var emitterLayers: [CAEmitterLayer] { (table.layer?.sublayers ?? []).compactMap { $0 as? CAEmitterLayer } }
+    private func fireworksState() -> String { "isFireworking=\(table.isFireworking) emitterLayers=\(emitterLayers.count) isWinAnimating=\(table.isWinAnimating) phase=\(game.phase)" }
+
+    /// Samples the emitter-layer count every `every` seconds for `duration`, then reports the maximum seen.
+    private func sampleEmitters(every: TimeInterval = 0.25, duration: TimeInterval, then: @escaping (_ maxCount: Int, _ samples: [String]) -> Void) {
+        var samples: [String] = []
+        var maxCount = 0
+        let start = Date()
+        let n = Int((duration / every).rounded())
+        for _ in 0..<n {
+            step(every) { [self] in
+                let c = emitterLayers.count
+                maxCount = max(maxCount, c)
+                samples.append(String(format: "%.1fs:%d%@", Date().timeIntervalSince(start), c, table.isFireworking ? "F" : ""))
+            }
+        }
+        step(0) { then(maxCount, samples) }
+    }
+
+    /// F. The View menu carries AppKit's "Enter Full Screen" but no window-tabbing items.
+    private func checkViewMenu() {
+        guard let viewMenu = NSApp.mainMenu?.items.compactMap(\.submenu).first(where: { $0.title == "View" }) else {
+            check("F0 View submenu present in the main menu", false, "menus: \(NSApp.mainMenu?.items.map { $0.submenu?.title ?? "<none>" } ?? [])"); return
+        }
+        NSApp.mainMenu?.update()
+        viewMenu.update()
+        var titles = viewMenu.items.map { $0.isSeparatorItem ? "<separator>" : $0.title }
+        note("F View menu items after update(): \(titles) (allowsAutomaticWindowTabbing=\(NSWindow.allowsAutomaticWindowTabbing) window.tabbingMode=\(window.tabbingMode.rawValue))")
+        if titles.isEmpty {
+            // AppKit fills the View menu lazily. Try the hooks a real menu open would fire, then look again.
+            NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: viewMenu)
+            for name in ["_menuWillOpen", "_populateFromDelegate", "_handleMenuOpening"] { let sel = Selector(name); guard viewMenu.responds(to: sel) else { continue }
+                note("F  calling NSMenu.\(sel) (private, responds=true)")
+                _ = viewMenu.perform(sel)
+            }
+            NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: viewMenu)
+            viewMenu.update()
+            titles = viewMenu.items.map { $0.isSeparatorItem ? "<separator>" : $0.title }
+            note("F View menu items after simulated tracking notifications: \(titles)")
+        }
+        let tabItems = titles.filter { $0.contains("Tab Bar") || $0.contains("All Tabs") }
+        check("F1 View menu has no tab-bar items", tabItems.isEmpty, tabItems.isEmpty ? "none of \(titles) mention Tab Bar / All Tabs" : "found \(tabItems)")
+        // AppKit inserts "Enter Full Screen" (and, when tabbing is allowed, the tab-bar items) only when
+        // the menu bar actually opens the menu, which this in-process harness cannot do, so F1 above is
+        // only vacuous and the tab-bar removal needs a manual look.
+        note("F2 View menu items without opening it (harness limitation, not a check): \(titles)")
+    }
+
+    /// G. The About panel shows the copyright line (from Info.plist and the "Copyright" option together).
+    private func checkAboutPanel() {
+        func texts(_ v: NSView) -> [String] {
+            var out: [String] = []
+            if let t = v as? NSTextField { out.append("NSTextField \(fmt(t.frame)) hidden=\(t.isHidden) \"\(t.stringValue.replacingOccurrences(of: "\n", with: "|"))\"") }
+            if let t = v as? NSTextView { out.append("NSTextView \(fmt(t.frame)) \"\(t.string.replacingOccurrences(of: "\n", with: "|"))\"") }
+            for s in v.subviews { out += texts(s) }
+            return out
+        }
+        let panels = NSApp.windows.filter { $0 !== window && $0.attachedSheet == nil && $0.isVisible }
+        let about = panels.first { w in w is NSPanel && (w.contentView.map { texts($0).contains { $0.contains("Solitaire") } } ?? false) }
+        guard let about, let content = about.contentView else {
+            check("G1 About panel shows © 2026 Brent Rockwood", false, "no visible NSPanel mentioning Solitaire; windows=\(NSApp.windows.map { "\(type(of: $0)) \"\($0.title)\" visible=\($0.isVisible)" })"); return
+        }
+        let all = texts(content)
+        note("G About panel \(type(of: about)) title=\"\(about.title)\" frame \(fmt(about.frame)) key=\(about.isKeyWindow)")
+        for t in all { note("  " + t) }
+        let copyright: NSTextField? = findView(content) { $0.stringValue.contains("© 2026 Brent Rockwood") }
+        check("G1 About panel shows © 2026 Brent Rockwood", copyright != nil && copyright?.isHidden == false,
+              copyright.map { "text field \(fmt($0.frame)) \"\($0.stringValue)\"" } ?? "no NSTextField containing the copyright; fields above")
+        about.close()
+        window.makeKeyAndOrderFront(nil)
     }
 
     // MARK: - Events
@@ -241,6 +328,11 @@ final class UITest {
             note("loaded seed \(seed); \(windowState())")
         }
         step { [self] in shot("loaded") }
+
+        // F. View menu; G. About panel (both before any table interaction)
+        step { [self] in checkViewMenu() }
+        step { (NSApp.delegate as? AppDelegate)?.showAbout() }
+        step(0.5) { [self] in checkAboutPanel() }
 
         // 1. Stock clicks
         step { [self] in click(centre(table.slotFrame(.stock))) }
@@ -507,11 +599,14 @@ final class UITest {
                                      tableau: [[kingC]]))
         }
         step { [self] in click(centre(table.frameOfCard(pile: .tableau(0), index: 0))) }
+        var fireworksBeforeSkip = ""
         step(1.5) { [self] in
             check("C1 win animation running 1.5 s after the winning click", game.phase == .completed && table.isWinAnimating, "phase=\(game.phase) isWinAnimating=\(table.isWinAnimating)")
+            fireworksBeforeSkip = fireworksState()
             let p = CGPoint(x: table.bounds.midX, y: table.bounds.height - 12)  // bare felt below the tableau
             click(p)
             check("C2 felt click stopped the win animation at once", !table.isWinAnimating, "isWinAnimating=\(table.isWinAnimating) after click at \(p)")
+            check("E5 skip click stopped the fireworks at once", !table.isFireworking && emitterLayers.isEmpty, "\(fireworksState()) (fireworks were \(fireworksBeforeSkip) before the click)")
             var wrong: [String] = []
             for f in 0..<4 { for card in game.foundations[f] where !approx(table.cardLayer(for: card)!.frame, table.slotFrame(.foundation(f))) { wrong.append("\(card)@\(fmt(table.cardLayer(for: card)!.frame))") } }
             check("C3 all cards back on foundations right after the click", wrong.isEmpty, wrong.isEmpty ? "52 cards on their foundation slots" : wrong.joined(separator: " "))
@@ -526,9 +621,42 @@ final class UITest {
         }
         step { [self] in
             check("C6 sheet dismissed", window.attachedSheet == nil, "sheet=\(String(describing: window.attachedSheet)) phase=\(game.phase)")
+            // Diagnostic for D3b: the geometry an NSAlert built like the app's reports right after layout(),
+            // which is when AppDelegate.showWinAlert positions the 🎉, versus the sheet as presented.
+            let alert = NSAlert()
+            alert.messageText = "You won!"
+            alert.informativeText = "Score: 10\nTime: 0:00\nMoves: 1"
+            alert.addButton(withTitle: "New Game")
+            alert.addButton(withTitle: "Close")
+            alert.layout()
+            if let content = alert.window.contentView, let b = alert.buttons.first {
+                let bf = content.convert(b.frame, from: b.superview)
+                note("D diag: replica alert after layout(): content.bounds \(fmt(content.bounds)) window.frame \(fmt(alert.window.frame)) New Game button \(fmt(bf)) (raw \(fmt(b.frame)) in \(String(describing: type(of: b.superview!))) \(fmt(b.superview!.frame))) → formula puts 🎉 centre at (\(bf.midX), \((bf.maxY + content.bounds.maxY) / 2))")
+                let image: NSView? = findView(content) { (v: NSImageView) in true }
+                note("D diag: image view \(image.map { "\(fmt($0.frame)) hidden=\($0.isHidden)" } ?? "none"); presented sheet was content (0,0 260x154) with the button at (134,16 110x28)")
+            }
         }
 
-        // 6. Win animation
+        // E6. A new deal during the fireworks cancels them: (a) at 1.0 s, during the cascade; (b) at 0.3 s, before it starts.
+        let wonButOne = { [self] in makeGame(foundations: [(1...13).map { c($0, .clubs) }, (1...13).map { c($0, .diamonds) }, (1...13).map { c($0, .hearts) }, (1...12).map { c($0, .spades) }],
+                                            tableau: [[c(13, .spades)]]) }
+        for (tag, loadAfter, label) in [("a", 1.0, "during the cascade"), ("b", 0.3, "before the cascade starts")] {
+            step { [self] in controller.load(wonButOne()) }
+            step { [self] in click(centre(table.frameOfCard(pile: .tableau(0), index: 0))) }
+            step(loadAfter) { [self] in
+                let before = fireworksState()
+                controller.load(Game(seed: 11, scoring: .standard, drawThree: false))
+                note("E6\(tag) loaded a new game \(loadAfter) s after completion (\(label)); before: \(before); now: \(fireworksState())")
+            }
+            step(0.2) { [self] in
+                check("E6\(tag)1 no fireworks 0.2 s after the new deal (\(label))", !table.isFireworking && emitterLayers.isEmpty && !table.isWinAnimating, fireworksState())
+            }
+            sampleEmitters(duration: 4.0) { [self] maxCount, samples in
+                check("E6\(tag)2 no fireworks appear in the following 4 s (\(label))", maxCount == 0 && !table.isFireworking, "max emitter layers \(maxCount); samples \(samples.joined(separator: " "))")
+            }
+        }
+
+        // 6. Win animation (with E1–E4 fireworks checks on the same completion)
         let king = c(13, .spades)
         step { [self] in
             controller.load(makeGame(foundations: [(1...13).map { c($0, .clubs) }, (1...13).map { c($0, .diamonds) }, (1...13).map { c($0, .hearts) }, (1...12).map { c($0, .spades) }],
@@ -540,15 +668,31 @@ final class UITest {
             winClickTime = Date()
             click(centre(table.frameOfCard(pile: .tableau(0), index: 0)))
         }
-        step { [self] in
+        step(0.3) { [self] in  // ~0.3 s after the click: the first burst (0.1 s) is up, the cascade (0.45 s) is not
             check("6a click completed the game", game.phase == .completed && game.foundations[3].count == 13, "phase=\(game.phase) F3=\(game.foundations[3].count) score=\(game.score)")
+            let t = Date().timeIntervalSince(winClickTime)
+            check("E1 fireworks running 0.3 s after the completing click", table.isFireworking, String(format: "%@ at %.2f s", fireworksState(), t))
+            let emitters = emitterLayers
+            if let e = emitters.first {
+                let cell = e.emitterCells?.first
+                let posOK = table.bounds.contains(e.emitterPosition)
+                check("E2 a CAEmitterLayer with a positioned, image-bearing cell", posOK && cell?.contents != nil && e.superlayer === table.layer,
+                      "\(emitters.count) emitter layer(s); first: position \(e.emitterPosition) in bounds \(fmt(table.bounds)) → \(posOK); cells=\(e.emitterCells?.count ?? 0) contents=\(cell?.contents == nil ? "nil" : "set") birthRate=\(cell?.birthRate ?? 0) lifetime=\(cell?.lifetime ?? 0) frame \(fmt(e.frame)) zPosition=\(e.zPosition)")
+            } else {
+                check("E2 a CAEmitterLayer with a positioned, image-bearing cell", false, "no CAEmitterLayer among \(table.layer?.sublayers?.count ?? 0) sublayers")
+            }
         }
-        step(1.1) { [self] in  // ~1.5 s after the click
+        step(1.2) { [self] in  // ~1.5 s after the click
             check("6b win animation running", table.isWinAnimating, "isWinAnimating=\(table.isWinAnimating)")
             var off = 0
             for f in 0..<4 { for card in game.foundations[f] where !approx(table.cardLayer(for: card)!.frame, table.slotFrame(.foundation(f))) { off += 1 } }
             check("6c cards in flight", off > 0, "\(off) card layers away from their foundation")
+            let n = emitterLayers.count
+            check("E3 two or more bursts present 1.5 s after the click", n >= 2, String(format: "%d emitter layers at %.2f s (bursts due at 0.1, 0.5, 0.85, 1.3 s, each 2.2 s long)", n, Date().timeIntervalSince(winClickTime)))
             shot("win-in-flight")
+        }
+        step(4.5) { [self] in  // ~6 s after the click: the last burst (3.2 s + 2.2 s) has gone; the cascade is still running
+            check("E4 fireworks over 6 s after the click", !table.isFireworking && emitterLayers.isEmpty, String(format: "%@ at %.2f s", fireworksState(), Date().timeIntervalSince(winClickTime)))
         }
         poll(timeout: 25, until: { [self] in !table.isWinAnimating }) { [self] done in
             check("6d win animation ended", done, String(format: done ? "ended %.1f s after the click" : "still running %.1f s after the click", Date().timeIntervalSince(winClickTime)))

@@ -8,11 +8,12 @@ APP      := build/Solitaire.app
 BIN      := .build/release/Solitaire
 ICONSET  := build/AppIcon.iconset
 SWIFT    := swift
+SHELL    := /bin/bash
 
 .PHONY: app run test install clean
 
 $(BIN): $(wildcard Sources/*/*.swift) Package.swift
-	$(SWIFT) build -c release 2>&1 | grep -v 'warning: search path' ; test -x $(BIN)
+	set -o pipefail; $(SWIFT) build -c release 2>&1 | grep -v 'warning: search path'
 
 app: $(BIN) Resources/Info.plist
 	rm -rf $(APP)

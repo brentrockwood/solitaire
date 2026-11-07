@@ -43,6 +43,8 @@ final class TableView: NSView {
     private var shimmerGeneration = 0
     private var shimmerPending = false  // a sweep was due while the window was not visible
     private var autocompleteWasAvailable = false
+    private var fireworkLayers: [CAEmitterLayer] = []
+    private var fireworksGeneration = 0
 
     init(controller: GameController) {
         self.controller = controller
@@ -240,6 +242,7 @@ final class TableView: NSView {
             if game.phase == .completed { return }
             stopWinAnimation()  // a new deal arrived mid-celebration
         }
+        if game.phase != .completed { stopFireworks() }  // a new deal in the moment before the cascade starts
         updateLabels()
         let render = !inLiveResize
         CATransaction.begin()
@@ -285,12 +288,85 @@ final class TableView: NSView {
         }
         CATransaction.commit()
         if game.phase == .completed && winAnimation == nil && animated {
+            startFireworks()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
                 guard let self, self.winAnimation == nil, self.controller.game.phase == .completed else { return }
                 self.startWinAnimation()
             }
         }
         updateAutocompleteHint()
+    }
+
+    // MARK: - Fireworks
+
+    /// A few seconds of bursts over the whole table when a game is won; ends with the celebration.
+    private func startFireworks() {
+        stopFireworks()  // also bumps the generation, so pending bursts from an earlier win are dropped
+        let generation = fireworksGeneration
+        let times: [Double] = [0.1, 0.5, 0.85, 1.3, 1.65, 2.1, 2.4, 2.85, 3.2]
+        for t in times {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in
+                guard let self, self.fireworksGeneration == generation, self.controller.game.phase == .completed else { return }
+                self.burst(at: CGPoint(x: self.bounds.width * .random(in: 0.12...0.88), y: self.bounds.height * .random(in: 0.12...0.55)))
+            }
+        }
+    }
+
+    private func stopFireworks() {
+        fireworksGeneration += 1  // cancels bursts not yet launched
+        for l in fireworkLayers { l.removeFromSuperlayer() }
+        fireworkLayers = []
+    }
+
+    var isFireworking: Bool { !fireworkLayers.isEmpty }
+
+    private static let sparkImage: CGImage = {
+        let n = 16
+        let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let colors = [CGColor(red: 1, green: 1, blue: 1, alpha: 1), CGColor(red: 1, green: 1, blue: 1, alpha: 0)] as CFArray
+        let g = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1])!
+        let c = CGPoint(x: CGFloat(n) / 2, y: CGFloat(n) / 2)
+        ctx.drawRadialGradient(g, startCenter: c, startRadius: 0, endCenter: c, endRadius: CGFloat(n) / 2, options: [])
+        return ctx.makeImage()!
+    }()
+
+    /// One firework: a point emitter that spits ~150 sparks in a tenth of a second, then falls silent
+    /// while they fade and fall. The layer is removed once the last spark has died.
+    private func burst(at p: CGPoint) {
+        let unit = m.cardH / 112  // scale the physics with the table
+        let emitter = CAEmitterLayer()
+        emitter.emitterPosition = p
+        emitter.emitterShape = .point
+        emitter.beginTime = CACurrentMediaTime()  // otherwise the layer appears mid-simulation, full of aged sparks
+        emitter.renderMode = .additive
+        emitter.zPosition = 5000
+        emitter.frame = bounds
+        emitter.actions = ["birthRate": NSNull()]
+        let hue = CGFloat.random(in: 0...1)
+        let cell = CAEmitterCell()
+        cell.contents = Self.sparkImage
+        cell.birthRate = 1500
+        cell.lifetime = 1.4
+        cell.lifetimeRange = 0.5
+        cell.velocity = 190 * unit
+        cell.velocityRange = 90 * unit
+        cell.emissionRange = .pi * 2
+        cell.yAcceleration = 260 * unit  // the view is flipped, so +y is down
+        cell.scale = 0.55
+        cell.scaleRange = 0.2
+        cell.scaleSpeed = -0.2
+        cell.alphaSpeed = -0.7
+        cell.color = NSColor(hue: hue, saturation: 0.75, brightness: 1, alpha: 1).cgColor
+        cell.redRange = 0.25; cell.greenRange = 0.25; cell.blueRange = 0.25
+        emitter.emitterCells = [cell]
+        layer?.addSublayer(emitter)
+        fireworkLayers.append(emitter)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { emitter.birthRate = 0 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+            emitter.removeFromSuperlayer()
+            self?.fireworkLayers.removeAll { $0 === emitter }
+        }
     }
 
     // MARK: - Autocomplete hint
@@ -623,6 +699,7 @@ final class TableView: NSView {
     }
 
     private func stopWinAnimation() {
+        stopFireworks()
         winAnimation?.link?.invalidate()
         winAnimation = nil
     }

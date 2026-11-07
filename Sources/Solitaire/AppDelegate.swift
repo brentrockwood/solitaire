@@ -168,6 +168,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         alert.informativeText = lines.joined(separator: "\n")
         alert.addButton(withTitle: "New Game")
         alert.addButton(withTitle: "Close")
+        alert.layout()
+        if let content = alert.window.contentView {  // the top-right of the sheet is otherwise empty
+            let party = NSTextField(labelWithString: "🎉")
+            party.font = NSFont.systemFont(ofSize: 34)
+            party.sizeToFit()
+            let inset: CGFloat = 16
+            party.frame.origin = CGPoint(x: content.bounds.maxX - inset - party.frame.width,
+                                         y: content.bounds.maxY - inset - party.frame.height)
+            party.autoresizingMask = [.minXMargin, .minYMargin]
+            content.addSubview(party)
+        }
         alert.beginSheetModal(for: window) { [weak self] r in
             if r == .alertFirstButtonReturn { self?.controller.newGame() }
         }

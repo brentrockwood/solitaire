@@ -96,19 +96,60 @@ final class UITest {
         note("screenshot \(path)")
     }
 
+    /// Renders the attached sheet's content view (an NSAlert) to a PNG via cacheDisplay, which needs no screen-recording permission.
+    private func shotSheet(_ name: String) {
+        guard let sheet = window.attachedSheet, let v = sheet.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else {
+            note("no sheet to snapshot"); return
+        }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        shotIndex += 1
+        let path = shotDir + "/" + String(format: "%02d-%@.png", shotIndex, name)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        note("sheet screenshot \(path) size \(v.bounds.size)")
+        func dump(_ view: NSView, _ depth: Int) {
+            let extra = (view as? NSTextField).map { " text=\"\($0.stringValue.replacingOccurrences(of: "\n", with: "|"))\"" } ?? ((view as? NSButton).map { " title=\"\($0.title)\"" } ?? ((view as? NSImageView).map { " image=\(String(describing: $0.image?.size))" } ?? ""))
+            note(String(repeating: "  ", count: depth) + "\(type(of: view)) \(fmt(view.frame)) hidden=\(view.isHidden)\(extra)")
+            for sub in view.subviews { dump(sub, depth + 1) }
+        }
+        dump(v, 0)
+    }
+
+    /// D. The win sheet's 🎉 label: present, inside the content view, in its top-right corner, clear of the title.
+    private func checkWinSheetEmoji() {
+        guard let sheet = window.attachedSheet, let content = sheet.contentView else { check("D1 win sheet content view", false, "no sheet attached"); return }
+        func find(_ v: NSView, _ pred: (NSTextField) -> Bool) -> NSTextField? {
+            if let t = v as? NSTextField, pred(t) { return t }
+            for s in v.subviews { if let t = find(s, pred) { return t } }
+            return nil
+        }
+        let party = find(content) { $0.stringValue == "🎉" }
+        let title = find(content) { $0.stringValue == "You won!" }
+        check("D1 🎉 label is a text field in the sheet", party != nil && title != nil, "party=\(party.map { fmt($0.frame) } ?? "missing") title=\(title.map { fmt($0.frame) } ?? "missing")")
+        guard let party, let title else { return }
+        let b = content.bounds
+        let pf = content.convert(party.frame, from: party.superview)
+        let tf = content.convert(title.frame, from: title.superview)
+        let where_ = "party \(fmt(pf)) title \(fmt(tf)) bounds \(fmt(b)) flipped=\(content.isFlipped) directChild=\(party.superview === content)"
+        check("D2 🎉 inside the content view", b.contains(pf) && !party.isHidden, where_)
+        check("D3 🎉 in the top-right corner", pf.maxX >= b.maxX - 20 && pf.maxY >= b.maxY - 20, where_)
+        check("D4 🎉 clear of the title", pf.minX > tf.minX + 100, where_)
+    }
+
     // MARK: - Events
 
-    private func event(_ type: NSEvent.EventType, at viewPoint: CGPoint) -> NSEvent {
+    private func event(_ type: NSEvent.EventType, at viewPoint: CGPoint, clickCount: Int = 1) -> NSEvent {
         let wp = table.convert(viewPoint, to: nil)  // view is flipped; AppKit converts
         eventNumber += 1
         return NSEvent.mouseEvent(with: type, location: wp, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                  windowNumber: window.windowNumber, context: nil, eventNumber: eventNumber, clickCount: 1, pressure: 1)!
+                                  windowNumber: window.windowNumber, context: nil, eventNumber: eventNumber, clickCount: clickCount, pressure: 1)!
     }
 
-    private func press(_ p: CGPoint) { table.mouseDown(with: event(.leftMouseDown, at: p)) }
+    private func press(_ p: CGPoint, clickCount: Int = 1) { table.mouseDown(with: event(.leftMouseDown, at: p, clickCount: clickCount)) }
     private func dragTo(_ p: CGPoint) { table.mouseDragged(with: event(.leftMouseDragged, at: p)) }
-    private func release(_ p: CGPoint) { table.mouseUp(with: event(.leftMouseUp, at: p)) }
+    private func release(_ p: CGPoint, clickCount: Int = 1) { table.mouseUp(with: event(.leftMouseUp, at: p, clickCount: clickCount)) }
     private func click(_ p: CGPoint) { press(p); release(p) }
+    /// What AppKit delivers for a double-click: a complete single click, then a down/up pair with clickCount 2.
+    private func doubleClick(_ p: CGPoint) { press(p); release(p); press(p, clickCount: 2); release(p, clickCount: 2) }
 
     /// Queues a full drag: down, four intermediate moves, up.
     private func drag(from a: CGPoint, to b: CGPoint, card: Card) {
@@ -127,6 +168,11 @@ final class UITest {
     // MARK: - Helpers
 
     private var game: Game { controller.game }
+    /// Why a sweep might be suppressed: the shimmer guard needs the window server to report the window visible.
+    private func windowState() -> String {
+        let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"].map { "\($0)" } ?? "nil"
+        return "occlusion=\(window.occlusionState.rawValue) visible=\(window.occlusionState.contains(.visible)) isVisible=\(window.isVisible) key=\(window.isKeyWindow) active=\(NSApp.isActive) onActiveSpace=\(window.isOnActiveSpace) screen=\(window.screen.map { fmt($0.frame) } ?? "nil") frontmost=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "nil") screenLocked=\(locked)"
+    }
     private func centre(_ r: CGRect) -> CGPoint { CGPoint(x: r.midX, y: r.midY) }
     private func approx(_ a: CGRect, _ b: CGRect, tol: CGFloat = 1) -> Bool {
         abs(a.minX - b.minX) < tol && abs(a.minY - b.minY) < tol && abs(a.width - b.width) < tol && abs(a.height - b.height) < tol
@@ -192,7 +238,7 @@ final class UITest {
         let seed = seedWithTableauMove()
         step(0.6) { [self] in
             controller.load(Game(seed: seed, scoring: .standard, drawThree: false))
-            note("loaded seed \(seed)")
+            note("loaded seed \(seed); \(windowState())")
         }
         step { [self] in shot("loaded") }
 
@@ -370,14 +416,128 @@ final class UITest {
             shot("after-waste-click")
         }
 
+        // Fixtures for A–C: three cards short of a win. Column 0 is K♠ under Q♥, column 1 is K♥.
+        // Q♥ can go straight to the hearts foundation (A–J), which reveals K♠; K♥ has no single-click target.
+        let nearDone = [(1...13).map { c($0, .clubs) }, (1...13).map { c($0, .diamonds) }, (1...11).map { c($0, .hearts) }, (1...12).map { c($0, .spades) }]
+        let hiddenKing = { [self] in makeGame(foundations: nearDone, tableau: [[c(13, .spades, up: false), c(12, .hearts)], [c(13, .hearts)]]) }
+        let allFaceUp = { [self] in makeGame(foundations: nearDone, tableau: [[c(13, .spades), c(12, .hearts)], [c(13, .hearts)]]) }
+
+        // A. Autocomplete shimmer hint
+        step { [self] in controller.load(hiddenKing()) }
+        step { [self] in
+            check("A1 hint inactive while a tableau card is face down", !controller.canAutocomplete && !table.autocompleteHintActive && !table.isShimmering,
+                  "canAutocomplete=\(controller.canAutocomplete) hintActive=\(table.autocompleteHintActive) shimmering=\(table.isShimmering)")
+            let p = centre(table.frameOfCard(pile: .tableau(0), index: 1))
+            note("A clicking Q♥ at \(p) to reveal K♠; \(windowState())")
+            click(p)
+        }
+        step(0.3) { [self] in
+            check("A2 revealing the last card makes the game finishable", controller.canAutocomplete && game.tableau[0].last?.faceUp == true,
+                  "canAutocomplete=\(controller.canAutocomplete) T0=\(game.tableau[0]) F2=\(game.foundations[2].count)")
+            // shimmer() only sweeps when the window server reports the window visible (not with a locked
+            // screen, say). Assert that contract: the band is showing iff the window is visible.
+            let visible = window.occlusionState.contains(.visible)
+            check("A3 shimmer band visible within 0.3 s (iff the window is visible)", table.isShimmering == visible,
+                  "isShimmering=\(table.isShimmering); \(visible ? "sweep ran" : "WINDOW NOT VISIBLE, sweep suppressed by the guard, not exercised"); \(windowState())")
+            check("A4 hint timer started", table.autocompleteHintActive, "hintActive=\(table.autocompleteHintActive)")
+            shot("shimmer")
+        }
+        step(0.9) { [self] in  // ~1.2 s after the click; the 0.9 s sweep has ended
+            check("A5 shimmer band hidden after the sweep", !table.isShimmering, "isShimmering=\(table.isShimmering)")
+            check("A6 hint timer still active between sweeps", table.autocompleteHintActive, "hintActive=\(table.autocompleteHintActive)")
+            controller.undo()
+        }
+        step { [self] in
+            check("A7 undo stops the hint timer", !controller.canAutocomplete && !table.autocompleteHintActive,
+                  "canAutocomplete=\(controller.canAutocomplete) hintActive=\(table.autocompleteHintActive) T0=\(game.tableau[0])")
+            click(centre(table.frameOfCard(pile: .tableau(0), index: 1)))  // finishable again
+        }
+        step(0.3) { [self] in
+            let visible = window.occlusionState.contains(.visible)
+            check("A8 hint restarts when the game becomes finishable again", controller.canAutocomplete && table.autocompleteHintActive && table.isShimmering == visible,
+                  "canAutocomplete=\(controller.canAutocomplete) hintActive=\(table.autocompleteHintActive) shimmering=\(table.isShimmering) windowVisible=\(visible)")
+            controller.load(hiddenKing())
+        }
+        step { [self] in
+            check("A9 loading an unfinishable game stops the hint timer", !table.autocompleteHintActive, "hintActive=\(table.autocompleteHintActive) canAutocomplete=\(controller.canAutocomplete)")
+        }
+
+        // B. Double-click autocompletes
+        var sigB = ""
+        step { [self] in
+            sigB = signature(game)
+            let p = centre(table.frameOfCard(pile: .tableau(1), index: 0))  // K♥
+            check("B1 setup: unfinishable, K♥ has no single-click target", !controller.canAutocomplete && game.autoMoveTarget(from: .tableau(1), index: 0) == nil,
+                  "canAutocomplete=\(controller.canAutocomplete) target=\(String(describing: game.autoMoveTarget(from: .tableau(1), index: 0)))")
+            doubleClick(p)
+            check("B2 double-click when unfinishable starts no autocomplete", !controller.canAutocomplete && game.phase == .playing, "canAutocomplete=\(controller.canAutocomplete) phase=\(game.phase)")
+        }
+        step(0.5) { [self] in
+            check("B3 model unchanged after that double-click", signature(game) == sigB && !table.isDragging, signature(game) == sigB ? "unchanged" : "changed to \(signature(game))")
+            controller.load(allFaceUp())
+        }
+        step { [self] in
+            // The exposed strip of K♠ (column 0, index 0) lies above Q♥'s frame, outside the bottom-card slack.
+            let f0 = table.frameOfCard(pile: .tableau(0), index: 0), f1 = table.frameOfCard(pile: .tableau(0), index: 1)
+            let p = CGPoint(x: f0.midX, y: (f0.minY + f1.minY) / 2)
+            sigB = signature(game)
+            check("B4 setup: finishable; point \(p) is on K♠ above Q♥ \(fmt(f1)); K♠ run has no single-click target",
+                  controller.canAutocomplete && f0.contains(p) && !f1.contains(p) && game.autoMoveTarget(from: .tableau(0), index: 0) == nil,
+                  "canAutocomplete=\(controller.canAutocomplete) target=\(String(describing: game.autoMoveTarget(from: .tableau(0), index: 0)))")
+            doubleClick(p)
+            check("B5 double-click on a non-bottom card starts no autocomplete", controller.canAutocomplete, "canAutocomplete=\(controller.canAutocomplete) (false while an autocomplete task runs)")
+        }
+        step(0.6) { [self] in
+            check("B6 model unchanged after the non-bottom double-click", signature(game) == sigB && game.phase == .playing, signature(game) == sigB ? "unchanged" : "changed to \(signature(game))")
+            let p = centre(table.frameOfCard(pile: .tableau(0), index: 1))  // Q♥, bottom of column 0
+            check("B7 finishable before the double-click", controller.canAutocomplete, "canAutocomplete=\(controller.canAutocomplete)")
+            doubleClick(p)
+            note("B double-clicked Q♥ at \(p): T0=\(game.tableau[0]) F2=\(game.foundations[2].count) canAutocomplete=\(controller.canAutocomplete) (false once the task is queued)")
+        }
+        poll(timeout: 15, until: { [self] in game.phase == .completed }) { [self] done in
+            check("B8 double-click on a bottom card autocompleted the game", done && game.isWon,
+                  "phase=\(game.phase) foundations=\(game.foundations.map(\.count)) moves=\(game.moves)")
+            shot("after-double-click-autocomplete")
+        }
+
+        // C. A click skips the win animation (the win sheet then appears; D checks its 🎉 label)
+        let kingC = c(13, .spades)
+        step { [self] in
+            controller.load(makeGame(foundations: [(1...13).map { c($0, .clubs) }, (1...13).map { c($0, .diamonds) }, (1...13).map { c($0, .hearts) }, (1...12).map { c($0, .spades) }],
+                                     tableau: [[kingC]]))
+        }
+        step { [self] in click(centre(table.frameOfCard(pile: .tableau(0), index: 0))) }
+        step(1.5) { [self] in
+            check("C1 win animation running 1.5 s after the winning click", game.phase == .completed && table.isWinAnimating, "phase=\(game.phase) isWinAnimating=\(table.isWinAnimating)")
+            let p = CGPoint(x: table.bounds.midX, y: table.bounds.height - 12)  // bare felt below the tableau
+            click(p)
+            check("C2 felt click stopped the win animation at once", !table.isWinAnimating, "isWinAnimating=\(table.isWinAnimating) after click at \(p)")
+            var wrong: [String] = []
+            for f in 0..<4 { for card in game.foundations[f] where !approx(table.cardLayer(for: card)!.frame, table.slotFrame(.foundation(f))) { wrong.append("\(card)@\(fmt(table.cardLayer(for: card)!.frame))") } }
+            check("C3 all cards back on foundations right after the click", wrong.isEmpty, wrong.isEmpty ? "52 cards on their foundation slots" : wrong.joined(separator: " "))
+            shot("after-skip-click")
+        }
+        step(1.5) { [self] in
+            check("C4 win animation did not restart", !table.isWinAnimating, "isWinAnimating=\(table.isWinAnimating)")
+            check("C5 win sheet shown after the skip", window.attachedSheet != nil, "sheet=\(String(describing: window.attachedSheet?.title))")
+            shotSheet("skip-win-sheet")
+            checkWinSheetEmoji()
+            if let sheet = window.attachedSheet { window.endSheet(sheet, returnCode: .alertSecondButtonReturn) }  // "Close"
+        }
+        step { [self] in
+            check("C6 sheet dismissed", window.attachedSheet == nil, "sheet=\(String(describing: window.attachedSheet)) phase=\(game.phase)")
+        }
+
         // 6. Win animation
         let king = c(13, .spades)
         step { [self] in
             controller.load(makeGame(foundations: [(1...13).map { c($0, .clubs) }, (1...13).map { c($0, .diamonds) }, (1...13).map { c($0, .hearts) }, (1...12).map { c($0, .spades) }],
                                      tableau: [[king]]))
         }
+        var winClickTime = Date()
         step { [self] in
             shot("near-won")
+            winClickTime = Date()
             click(centre(table.frameOfCard(pile: .tableau(0), index: 0)))
         }
         step { [self] in
@@ -391,13 +551,17 @@ final class UITest {
             shot("win-in-flight")
         }
         poll(timeout: 25, until: { [self] in !table.isWinAnimating }) { [self] done in
-            check("6d win animation ended", done, done ? "ended" : "still running after 25 s")
+            check("6d win animation ended", done, String(format: done ? "ended %.1f s after the click" : "still running %.1f s after the click", Date().timeIntervalSince(winClickTime)))
             var wrong: [String] = []
             for f in 0..<4 { for card in game.foundations[f] where !approx(table.cardLayer(for: card)!.frame, table.slotFrame(.foundation(f))) { wrong.append("\(card)@\(fmt(table.cardLayer(for: card)!.frame))") } }
             check("6e all cards back on foundations", wrong.isEmpty, wrong.isEmpty ? "52 cards on their foundation slots" : wrong.joined(separator: " "))
             let (ok, d) = layerAt(king, table.slotFrame(.foundation(3)))
             check("6f K♠ on foundation 3", ok, d)
             shot("after-win")
+        }
+        step(0.6) { [self] in
+            check("6g win sheet shown", window.attachedSheet != nil, "sheet=\(String(describing: window.attachedSheet?.title))")
+            shotSheet("win-sheet")
         }
 
         step(0.8) { [self] in

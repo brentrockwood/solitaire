@@ -38,6 +38,11 @@ final class TableView: NSView {
     private var pressedCard: (pile: Pile, index: Int)?
     private var pressedStock = false
     private var winAnimation: WinAnimation?
+    private var shimmerLayer: CAGradientLayer?
+    private var shimmerTimer: Timer?
+    private var shimmerGeneration = 0
+    private var shimmerPending = false  // a sweep was due while the window was not visible
+    private var autocompleteWasAvailable = false
 
     init(controller: GameController) {
         self.controller = controller
@@ -104,6 +109,23 @@ final class TableView: NSView {
     override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
         needsLayout = true
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        if let newWindow {
+            NotificationCenter.default.addObserver(self, selector: #selector(occlusionChanged), name: NSWindow.didChangeOcclusionStateNotification, object: newWindow)
+        } else {
+            shimmerTimer?.invalidate()
+            shimmerTimer = nil
+        }
+    }
+
+    /// The first sweep is usually due before the window server reports the window visible (a saved
+    /// finishable game at launch); run it once the window becomes visible.
+    @objc private func occlusionChanged() {
+        if shimmerPending { shimmer() }
     }
 
     private func cancelDrag() {
@@ -268,6 +290,88 @@ final class TableView: NSView {
                 self.startWinAnimation()
             }
         }
+        updateAutocompleteHint()
+    }
+
+    // MARK: - Autocomplete hint
+
+    /// In place of the original's Autocomplete button: a sheen sweeps the table when the game
+    /// becomes finishable, then again every ten seconds until it is finished or undone.
+    private func updateAutocompleteHint() {
+        let available = controller.canAutocomplete
+        if available && !autocompleteWasAvailable {
+            shimmer()
+            shimmerTimer?.invalidate()
+            shimmerTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.shimmer() }
+            }
+            shimmerTimer?.tolerance = 1
+        } else if !available {
+            shimmerTimer?.invalidate()
+            shimmerTimer = nil
+            shimmerPending = false
+        }
+        autocompleteWasAvailable = available
+    }
+
+    /// One diagonal band of light crossing the table left to right in under a second.
+    func shimmer() {
+        guard winAnimation == nil, drag == nil else { return }
+        guard let window, window.occlusionState.contains(.visible) else { shimmerPending = true; return }
+        shimmerPending = false
+        let band = shimmerLayer ?? {
+            let l = CAGradientLayer()
+            let clear = NSColor.white.withAlphaComponent(0).cgColor
+            l.colors = [clear, NSColor.white.withAlphaComponent(0.30).cgColor, clear]
+            l.locations = [0, 0.5, 1]
+            l.startPoint = CGPoint(x: 0, y: 0.5)
+            l.endPoint = CGPoint(x: 1, y: 0.5)
+            l.zPosition = 4000
+            l.isHidden = true
+            l.actions = ["position": NSNull(), "bounds": NSNull(), "transform": NSNull(), "hidden": NSNull()]
+            layer?.addSublayer(l)
+            shimmerLayer = l
+            return l
+        }()
+        let W = bounds.width, H = bounds.height
+        let tilt: CGFloat = .pi / 9
+        let bandW = max(80, (W * 0.22).rounded())
+        // Start and end far enough out that the tilted band's corners are off-screen at both ends.
+        let overshoot = bandW + (H / 2) * tan(tilt)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        band.bounds = CGRect(x: 0, y: 0, width: bandW, height: H * 2.5)  // tall enough to span the view when tilted
+        band.transform = CATransform3DMakeRotation(tilt, 0, 0, 1)
+        band.position = CGPoint(x: W + overshoot, y: H / 2)
+        band.isHidden = false
+        CATransaction.commit()
+        let sweep = CABasicAnimation(keyPath: "position.x")
+        sweep.fromValue = -overshoot
+        sweep.toValue = W + overshoot
+        sweep.duration = 0.9
+        sweep.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        shimmerGeneration += 1
+        let generation = shimmerGeneration
+        CATransaction.begin()
+        // Replacing the "sweep" animation fires the earlier transaction's completion block at once,
+        // so only the latest sweep may hide the band.
+        CATransaction.setCompletionBlock { [weak self, weak band] in
+            if self?.shimmerGeneration == generation { band?.isHidden = true }
+        }
+        band.add(sweep, forKey: "sweep")
+        CATransaction.commit()
+    }
+
+    /// True if `p` is on the exposed (bottom) card of a tableau column, allowing one card of slack
+    /// below it because the first click of a double-click may have just sent that card to a foundation.
+    private func isBottomTableauCard(at p: CGPoint, game: Game) -> Bool {
+        for col in 0..<7 {
+            let cards = game.tableau[col]
+            var r = cards.isEmpty ? slotRect(.tableau(col)) : frame(for: .tableau(col), index: cards.count - 1, in: game)
+            r.size.height += m.faceUpOffset
+            if r.contains(p) { return true }
+        }
+        return false
     }
 
     private func setFace(_ l: CALayer, card: Card, animated: Bool) {
@@ -341,6 +445,8 @@ final class TableView: NSView {
     var cardSize: CGSize { CGSize(width: m.cardW, height: m.cardH) }
     var isDragging: Bool { drag != nil }
     var isWinAnimating: Bool { winAnimation != nil }
+    var isShimmering: Bool { shimmerLayer.map { !$0.isHidden } ?? false }
+    var autocompleteHintActive: Bool { shimmerTimer != nil }
 
     // MARK: - Hit testing
 
@@ -378,11 +484,16 @@ final class TableView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        guard winAnimation == nil else { return }
         let p = convert(event.locationInWindow, from: nil)
         let game = controller.game
         pressedCard = nil
         pressedStock = false
+        if winAnimation != nil { finishWinAnimation(); return }  // a click skips the rest of the celebration
+        guard game.phase == .playing else { return }  // a finished table ignores clicks; otherwise a snap-back re-runs the celebration
+        if event.clickCount == 2, controller.canAutocomplete, isBottomTableauCard(at: p, game: game) {
+            controller.autocomplete()
+            return
+        }
         if slotRect(.stock).contains(p) { pressedStock = true; return }
         guard let (pile, index) = pileHit(at: p, game: game) else { return }
         pressedCard = (pile, index)
@@ -501,11 +612,14 @@ final class TableView: NSView {
             anim.bodies[i] = b
         }
         CATransaction.commit()
-        if anim.launchedCount == anim.bodies.count && active == 0 {
-            stopWinAnimation()
-            apply(controller.game, animated: false)
-            if controller.game.phase == .completed { controller.onWin?() }
-        }
+        if anim.launchedCount == anim.bodies.count && active == 0 { finishWinAnimation() }
+    }
+
+    /// Ends the celebration, puts every card back on its foundation and reports the win.
+    private func finishWinAnimation() {
+        stopWinAnimation()
+        apply(controller.game, animated: false)
+        if controller.game.phase == .completed { controller.onWin?() }
     }
 
     private func stopWinAnimation() {
